@@ -591,14 +591,19 @@ function renderBlips() {
 // ── OpenSky fetch ─────────────────────────────────────────────
 let fetchTimer;
 
+// ── CONFIGURATION ─────────────────────────────────────────────
+// After deploying worker.js to Cloudflare, replace the URL below
+// with your worker's URL, e.g. https://flightwatch.YOUR-NAME.workers.dev
+const WORKER_URL = 'https://flightwatch-proxy.sawebb920.workers.dev';
+
 function buildUrl() {
-  const deg = rangeNm * NM_TO_DEG;
+  const deg    = rangeNm * NM_TO_DEG;
   const cosLat = Math.cos(centerLat * Math.PI / 180);
   const lamin  = centerLat - deg;
   const lamax  = centerLat + deg;
   const lomin  = centerLon - deg / cosLat;
   const lomax  = centerLon + deg / cosLat;
-  return `https://opensky-network.org/api/states/all?lamin=${lamin.toFixed(4)}&lomin=${lomin.toFixed(4)}&lamax=${lamax.toFixed(4)}&lomax=${lomax.toFixed(4)}`;
+  return `${WORKER_URL}?lamin=${lamin.toFixed(4)}&lomin=${lomin.toFixed(4)}&lamax=${lamax.toFixed(4)}&lomax=${lomax.toFixed(4)}`;
 }
 
 async function fetchFlights() {
