@@ -592,15 +592,14 @@ function renderBlips() {
 let fetchTimer;
 
 // ── DATA SOURCE ───────────────────────────────────────────────
-// adsb.fi open data — no API key, no auth, CORS-friendly
-// https://github.com/adsbfi/opendata
-// Max range: 250 NM. Rate limit: 1 req/sec (we poll every 12s, well within limits)
-const ADSB_FI_BASE = 'https://opendata.adsb.fi/api/v2/lat';
+// Cloudflare Worker proxies adsb.fi open data — no secrets needed.
+// The worker URL below is safe to commit publicly; it contains no keys.
+// adsb.fi data format: { ac: [...] } with named fields
+const WORKER_URL = 'https://flightwatch-proxy.sawebb920.workers.dev';
 
 function buildUrl() {
-  // adsb.fi caps at 250 NM
-  const dist = Math.min(rangeNm, 250);
-  return `${ADSB_FI_BASE}/${centerLat.toFixed(4)}/lon/${centerLon.toFixed(4)}/dist/${dist}`;
+  const dist = Math.min(rangeNm, 250); // adsb.fi caps at 250 NM
+  return `${WORKER_URL}?lat=${centerLat.toFixed(4)}&lon=${centerLon.toFixed(4)}&dist=${dist}`;
 }
 
 async function fetchFlights() {
