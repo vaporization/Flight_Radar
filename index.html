@@ -189,7 +189,7 @@
       box-shadow: 0 0 6px var(--green);
     }
 
-    #locate-btn, #fullscreen-btn {
+    #locate-btn, #fullscreen-btn, #zoom-in-btn, #zoom-out-btn, #zoom-reset-btn {
       background: transparent;
       border: 1px solid var(--green-dim);
       color: var(--green);
@@ -200,10 +200,15 @@
       letter-spacing: 0.1em;
       transition: background 0.15s, box-shadow 0.15s;
     }
-    #locate-btn:hover, #fullscreen-btn:hover {
+    #locate-btn:hover, #fullscreen-btn:hover,
+    #zoom-in-btn:hover, #zoom-out-btn:hover, #zoom-reset-btn:hover {
       background: rgba(0,255,65,0.1);
       box-shadow: 0 0 8px var(--green-dim);
     }
+    .zoom-group {
+      display: flex; align-items: center; gap: 4px;
+    }
+    .zoom-group label { color: #009922; margin-right: 2px; }
 
     /* ── RESPONSIVE: narrow screens hide sidebar ──────────── */
     @media (max-width: 600px) {
@@ -254,10 +259,11 @@
     <!-- RADAR -->
     <div id="radar-wrap">
       <div id="radar-container">
-        <canvas id="bg-canvas"></canvas>    <!-- static rings + grid  -->
-        <canvas id="trail-canvas"  style="position:absolute;top:0;left:0"></canvas>  <!-- echo trails  -->
-        <canvas id="sweep-canvas"  style="position:absolute;top:0;left:0"></canvas>  <!-- sweep beam   -->
-        <canvas id="blip-canvas"   style="position:absolute;top:0;left:0"></canvas>  <!-- aircraft     -->
+        <canvas id="bg-canvas"></canvas>                                               <!-- static bezel  -->
+        <canvas id="trail-canvas"  style="position:absolute;top:0;left:0"></canvas> <!-- echo trails   -->
+        <canvas id="grid-canvas"   style="position:absolute;top:0;left:0"></canvas> <!-- pulsing grid  -->
+        <canvas id="sweep-canvas"  style="position:absolute;top:0;left:0"></canvas> <!-- sweep beam    -->
+        <canvas id="blip-canvas"   style="position:absolute;top:0;left:0"></canvas> <!-- aircraft      -->
       </div>
       <div id="toast">ACQUIRING SIGNAL…</div>
     </div>
@@ -296,6 +302,12 @@
       <input type="range" id="range-slider" min="50" max="1000" value="200" step="50" />
       <span id="range-val">200 NM</span>
       <button id="locate-btn">&#9678; RE-CENTER</button>
+      <div class="zoom-group">
+        <label>ZOOM:</label>
+        <button id="zoom-in-btn">&#9650; IN</button>
+        <button id="zoom-out-btn">&#9660; OUT</button>
+        <button id="zoom-reset-btn">&#9675; RESET</button>
+      </div>
       <button id="fullscreen-btn">&#9633; FULLSCREEN</button>
     </div>
     <div>DATA: AIRPLANES.LIVE · ADS-B OPEN DATA · NON-COMMERCIAL USE</div>
@@ -311,10 +323,12 @@
 
 // ── canvases ──────────────────────────────────────────────────
 const bgC     = document.getElementById('bg-canvas');
+const gridC   = document.getElementById('grid-canvas');
 const trailC  = document.getElementById('trail-canvas');
 const sweepC  = document.getElementById('sweep-canvas');
 const blipC   = document.getElementById('blip-canvas');
 const ctxBg   = bgC.getContext('2d');
+const ctxGrid = gridC.getContext('2d');
 const ctxTr   = trailC.getContext('2d');
 const ctxSw   = sweepC.getContext('2d');
 const ctxBl   = blipC.getContext('2d');
@@ -331,6 +345,23 @@ let aircraft   = [];        // current frame ADS-B data
 let trails     = {};        // icao24 → [{x,y,age}]
 let sweepAngle = -Math.PI/2; // radians, starts pointing up
 let selectedId = null;
+
+// ── zoom ──────────────────────────────────────────────────────
+const ZOOM_STEPS   = [25, 50, 100, 150, 200, 250, 300, 400, 500];
+const ZOOM_DEFAULT = 200; // NM
+let   zoomIndex    = ZOOM_STEPS.indexOf(ZOOM_DEFAULT);
+
+function applyZoom(newIndex) {
+  zoomIndex = Math.max(0, Math.min(ZOOM_STEPS.length - 1, newIndex));
+  rangeNm   = ZOOM_STEPS[zoomIndex];
+  document.getElementById('range-slider').value       = rangeNm;
+  document.getElementById('range-val').textContent    = rangeNm + ' NM';
+  document.getElementById('hdr-range').textContent    = 'RANGE: ' + rangeNm + ' NM';
+  ctxTr.clearRect(0, 0, W, W);
+  drawBg();
+  clearTimeout(fetchTimer);
+  fetchFlights();
+}
 
 const REFRESH_MS  = 12000;  // adsb.fi rate limit: 1 req/sec; we poll every 12s
 const SWEEP_RPM   = 6;      // rotations per minute
@@ -350,7 +381,7 @@ function resize() {
   cx = cy = W / 2;
   R  = W  / 2 - 8;
 
-  [bgC, trailC, sweepC, blipC].forEach(c => {
+  [bgC, gridC, trailC, sweepC, blipC].forEach(c => {
     c.width  = W;
     c.height = W;
   });
@@ -384,91 +415,150 @@ function distNm(lat, lon) {
   return Math.sqrt(dlat*dlat + dlon*dlon);
 }
 
-// ── static background ─────────────────────────────────────────
+// ── static background (permanent elements only) ──────────────
 function drawBg() {
   const ctx = ctxBg;
   ctx.clearRect(0, 0, W, W);
 
-  // outer bezel
+  // dark fill inside radar circle
   ctx.beginPath();
   ctx.arc(cx, cy, R + 6, 0, Math.PI * 2);
   ctx.fillStyle = '#000800';
   ctx.fill();
-  ctx.strokeStyle = '#005500';
-  ctx.lineWidth = 2;
-  ctx.stroke();
 
-  // phosphor glow overlay (radial dim)
+  // phosphor vignette
   const grd = ctx.createRadialGradient(cx, cy, R * 0.3, cx, cy, R);
   grd.addColorStop(0, 'rgba(0,20,0,0)');
   grd.addColorStop(1, 'rgba(0,6,0,0.55)');
-  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI*2);
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
   ctx.fillStyle = grd; ctx.fill();
 
-  // rings
-  const ringCount = 4;
-  for (let i = 1; i <= ringCount; i++) {
-    const r = (R / ringCount) * i;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.strokeStyle = i === ringCount ? '#004400' : '#002800';
-    ctx.lineWidth   = i === ringCount ? 1.5 : 0.8;
-    ctx.stroke();
+  // ── permanent solid outer bezel ring (never pulses) ──────────
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.strokeStyle = '#00aa44';
+  ctx.lineWidth   = 2;
+  ctx.shadowColor = '#00ff41';
+  ctx.shadowBlur  = 8;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
 
-    // range label
-    const labelNm = Math.round(rangeNm * i / ringCount);
-    ctx.fillStyle = '#003d00';
-    ctx.font = `${Math.max(9, W * 0.018)}px 'Share Tech Mono', monospace`;
-    ctx.fillText(labelNm + 'NM', cx + r + 4, cy - 3);
+  // permanent outer degree tick marks (short, always visible)
+  for (let a = 0; a < 360; a += 10) {
+    const rad     = (a - 90) * Math.PI / 180;
+    const isMaj   = a % 30 === 0;
+    const tickLen = isMaj ? 10 : 5;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(rad) * (R - tickLen), cy + Math.sin(rad) * (R - tickLen));
+    ctx.lineTo(cx + Math.cos(rad) * R,             cy + Math.sin(rad) * R);
+    ctx.strokeStyle = isMaj ? '#007722' : '#004411';
+    ctx.lineWidth   = isMaj ? 1.5 : 0.8;
+    ctx.stroke();
   }
 
-  // cross-hairs
-  ctx.strokeStyle = '#002800';
+  // center dot (permanent)
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+  ctx.fillStyle   = '#00ff41';
+  ctx.shadowColor = '#00ff41';
+  ctx.shadowBlur  = 6;
+  ctx.fill();
+  ctx.shadowBlur  = 0;
+}
+
+// ── animated grid (rings + spokes + labels) — own canvas, redrawn every frame ──
+function drawGrid(pulseT) {
+  const ctx = ctxGrid;
+
+  // clear this canvas entirely each frame — safe because it's its own layer
+  ctx.clearRect(0, 0, W, W);
+
+  // clip to radar circle
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.clip();
+
+  // heartbeat: sine wave, period 3 s, alpha range 0.25 → 0.95
+  const pulse = 0.60 + 0.35 * Math.sin(pulseT * (2 * Math.PI / 3));
+
+  // ── range rings at 50 NM intervals ──────────────────────────
+  const ringStepNm = 50;
+  const fontSize   = Math.max(9, W * 0.018);
+  ctx.font = `${fontSize}px 'Share Tech Mono', monospace`;
+
+  for (let nm = ringStepNm; nm < rangeNm; nm += ringStepNm) {
+    const r       = (nm / rangeNm) * R;
+    const isMajor = nm % 100 === 0;
+    const alpha   = pulse * (isMajor ? 0.9 : 0.6);
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(0,${isMajor ? 210 : 150},${isMajor ? 80 : 55},${alpha})`;
+    ctx.lineWidth   = isMajor ? 1.3 : 0.8;
+    ctx.stroke();
+
+    // NM label
+    ctx.fillStyle = `rgba(0,${isMajor ? 230 : 170},${isMajor ? 85 : 58},${pulse * (isMajor ? 0.95 : 0.7)})`;
+    ctx.fillText(nm + 'NM', cx + r + 4, cy - 3);
+  }
+
+  // ── cross-hairs ─────────────────────────────────────────────
+  ctx.strokeStyle = `rgba(0,150,55,${pulse * 0.5})`;
   ctx.lineWidth   = 0.7;
   ctx.setLineDash([4, 6]);
   ctx.beginPath(); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.stroke();
   ctx.setLineDash([]);
 
-  // 30-degree spokes
+  // ── 30-degree spokes ────────────────────────────────────────
   for (let a = 0; a < 360; a += 30) {
     const rad = (a - 90) * Math.PI / 180;
     ctx.beginPath();
     ctx.moveTo(cx + Math.cos(rad) * (R * 0.05), cy + Math.sin(rad) * (R * 0.05));
-    ctx.lineTo(cx + Math.cos(rad) * R,           cy + Math.sin(rad) * R);
-    ctx.strokeStyle = '#002000'; ctx.lineWidth = 0.5;
+    ctx.lineTo(cx + Math.cos(rad) * (R * 0.82), cy + Math.sin(rad) * (R * 0.82));
+    ctx.strokeStyle = `rgba(0,135,48,${pulse * 0.45})`;
+    ctx.lineWidth   = 0.6;
     ctx.stroke();
 
-    // degree labels
-    ctx.fillStyle = '#004400';
+    // degree label
+    ctx.fillStyle = `rgba(0,190,65,${pulse * 0.80})`;
     ctx.font = `${Math.max(8, W * 0.016)}px 'Share Tech Mono', monospace`;
     const lx = cx + Math.cos(rad) * (R * 0.88);
     const ly = cy + Math.sin(rad) * (R * 0.88);
     ctx.fillText(a + '°', lx - 10, ly + 4);
   }
 
-  // center dot
+  ctx.restore();
+
+  // center dot (outside clip so it's always sharp)
   ctx.beginPath();
   ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-  ctx.fillStyle = '#00ff41';
+  ctx.fillStyle   = '#00ff41';
+  ctx.shadowColor = '#00ff41';
+  ctx.shadowBlur  = 6;
   ctx.fill();
-
-  // clip path for all other layers
+  ctx.shadowBlur  = 0;
 }
 
 // ── sweep animation ───────────────────────────────────────────
 let lastTime = 0;
 let animId;
 
+let pulseT = 0; // seconds, drives heartbeat
+
 function animateSweep(ts) {
   animId = requestAnimationFrame(animateSweep);
-  const dt = Math.min(ts - lastTime, 50) / 1000; // seconds, cap at 50 ms
+  const dt = Math.min(ts - lastTime, 50) / 1000;
   lastTime = ts;
+
+  pulseT += dt;
 
   const sweepSpeed = (SWEEP_RPM * 2 * Math.PI) / 60;
   sweepAngle += sweepSpeed * dt;
   if (sweepAngle > Math.PI * 2 - Math.PI/2) sweepAngle -= Math.PI * 2;
 
+  drawGrid(pulseT);   // pulsing rings, spokes, labels
   drawSweep();
   fadeTrails(dt);
   renderBlips();
@@ -521,10 +611,15 @@ function drawSweep() {
 
 function fadeTrails(dt) {
   const ctx = ctxTr;
-  // Instead of clearing & redrawing, we overlay a semi-transparent rect
-  // to simulate phosphor fade
-  ctx.fillStyle = 'rgba(0,8,0,0.04)';
+  // Overlay a very slightly opaque fill clipped to the radar circle
+  // This fades old trail dots without darkening the layers above
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = 'rgba(0,8,0,0.06)';
   ctx.fillRect(0, 0, W, W);
+  ctx.restore();
 }
 
 // ── blips ─────────────────────────────────────────────────────
@@ -698,6 +793,12 @@ function updateDetailPanel(ac) {
   document.getElementById('d-dist').textContent   = dist;
 }
 
+// ── scroll-wheel zoom ────────────────────────────────────────
+blipC.addEventListener('wheel', e => {
+  e.preventDefault();
+  applyZoom(zoomIndex + (e.deltaY < 0 ? -1 : 1));
+}, { passive: false });
+
 // click on radar to select nearest blip
 blipC.addEventListener('click', e => {
   const rect = blipC.getBoundingClientRect();
@@ -732,16 +833,28 @@ function showToast(msg, autoHide) {
   if (autoHide) toastTimer = setTimeout(() => el.classList.remove('show'), 2500);
 }
 
-// ── range slider ──────────────────────────────────────────────
+// ── range slider (still works for manual input) ──────────────
 const slider = document.getElementById('range-slider');
 slider.addEventListener('input', () => {
-  rangeNm = +slider.value;
+  rangeNm   = +slider.value;
+  // snap zoomIndex to nearest step
+  zoomIndex = ZOOM_STEPS.reduce((best, nm, i) =>
+    Math.abs(nm - rangeNm) < Math.abs(ZOOM_STEPS[best] - rangeNm) ? i : best, 0);
   document.getElementById('range-val').textContent    = rangeNm + ' NM';
   document.getElementById('hdr-range').textContent    = 'RANGE: ' + rangeNm + ' NM';
   ctxTr.clearRect(0,0,W,W);
   drawBg();
   clearTimeout(fetchTimer);
   fetchFlights();
+});
+
+// ── zoom buttons ──────────────────────────────────────────────
+document.getElementById('zoom-in-btn').addEventListener('click',    () => applyZoom(zoomIndex - 1));
+document.getElementById('zoom-out-btn').addEventListener('click',   () => applyZoom(zoomIndex + 1));
+document.getElementById('zoom-reset-btn').addEventListener('click', () => {
+  zoomIndex = ZOOM_STEPS.indexOf(ZOOM_DEFAULT);
+  applyZoom(zoomIndex);
+  showToast('ZOOM RESET TO 200 NM', true);
 });
 
 // ── re-center (geolocation) ───────────────────────────────────
