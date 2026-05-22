@@ -250,7 +250,7 @@
       <span id="hdr-range">RANGE: 200 NM</span>
       <span id="hdr-contacts">CONTACTS: 0</span>
       <span id="hdr-time">--:--:-- UTC</span>
-      <span class="blink" id="hdr-live">● LIVE</span>
+      <span class="blink" id="hdr-live">● LIVE</span><span id="hdr-fetch" style="opacity:0.6">FETCH #0</span>
     </div>
   </div>
 
@@ -702,15 +702,19 @@ function buildUrl() {
 }
 
 let fetchInProgress = false;
+let fetchCount = 0;
 
 async function fetchFlights() {
   // Hard guard: never allow two fetches at the same time
   if (fetchInProgress) return;
   fetchInProgress = true;
-  clearTimeout(fetchTimer); // cancel any pending scheduled fetch
+  clearTimeout(fetchTimer);
 
+  fetchCount++;
+  const fetchEl = document.getElementById('hdr-fetch');
+  if (fetchEl) fetchEl.textContent = `FETCH #${fetchCount}`;
   try {
-    showToast('POLLING AIRPLANES.LIVE…', false);
+    showToast('POLLING DATA SOURCE…', false);
     const url        = buildUrl();
     const controller = new AbortController();
     const timeoutId  = setTimeout(() => controller.abort(), 9000);
