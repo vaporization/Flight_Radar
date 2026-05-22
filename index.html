@@ -898,30 +898,51 @@ document.addEventListener('fullscreenchange', () => {
 });
 
 // ── boot ──────────────────────────────────────────────────────
+// Single controlled startup: one fetch, triggered exactly once after
+// position resolves. fetchStarted flag ensures nothing else can race it.
+let fetchStarted = false;
+
+function startFetch() {
+  if (fetchStarted) return;  // absolute guard — only ever start once
+  fetchStarted = true;
+  fetchFlights();
+}
+
 resize();
 showToast('INITIALIZING… ACQUIRING POSITION', false);
 requestAnimationFrame(ts => { lastTime = ts; animateSweep(ts); });
 
-// Auto-center on user's location at startup, then begin fetching
 if (navigator.geolocation) {
+  let posResolved = false;
   navigator.geolocation.getCurrentPosition(
     pos => {
+      if (posResolved) return;
+      posResolved = true;
       centerLat = pos.coords.latitude;
       centerLon = pos.coords.longitude;
       document.getElementById('hdr-pos').textContent =
         `LAT: ${centerLat.toFixed(2)} / LON: ${centerLon.toFixed(2)}`;
       drawBg();
-      fetchFlights();
+      startFetch();
     },
     () => {
-      // Location denied — fall back to default and fetch anyway
+      if (posResolved) return;
+      posResolved = true;
       showToast('LOCATION DENIED — USING DEFAULT POSITION', true);
-      fetchFlights();
+      startFetch();
     },
-    { timeout: 6000, maximumAge: 60000 }
+    { timeout: 5000, maximumAge: 60000 }
   );
+  // Fallback: if geolocation hangs past 6 s, start anyway with default position
+  setTimeout(() => {
+    if (!posResolved) {
+      posResolved = true;
+      showToast('LOCATION TIMEOUT — USING DEFAULT POSITION', true);
+      startFetch();
+    }
+  }, 6000);
 } else {
-  fetchFlights();
+  startFetch();
 }
 </script>
 </body>
