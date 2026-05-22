@@ -310,7 +310,7 @@
       </div>
       <button id="fullscreen-btn">&#9633; FULLSCREEN</button>
     </div>
-    <div>DATA: AIRPLANES.LIVE · ADS-B OPEN DATA · NON-COMMERCIAL USE</div>
+    <div>DATA: AIRPLANES.LIVE / ADSB.ONE / ADSB.FI · ADS-B OPEN DATA · NON-COMMERCIAL USE</div>
   </div>
 </div>
 
@@ -690,22 +690,25 @@ function renderBlips() {
 let fetchTimer;
 
 // ── DATA SOURCE ───────────────────────────────────────────────
-// airplanes.live via Cloudflare Worker proxy (free, no key required).
-// Worker handles CORS. Same response format as adsb.fi / ADSBExchange v2.
-// Max range: 250 NM.
-const WORKER_URL = 'https://flightwatch-proxy.sawebb920.workers.dev';
+// Calls airplanes.live directly from the browser.
+// These community ADS-B APIs allow browser/GitHub Pages origins but block
+// server/datacenter IPs — so direct browser calls are the correct approach.
+// Fallback chain: airplanes.live → adsb.one → adsb.fi
+const SOURCES = [
+  (lat, lon, dist) => `https://api.airplanes.live/v2/point/${lat}/${lon}/${dist}`,
+  (lat, lon, dist) => `https://api.adsb.one/v2/point/${lat}/${lon}/${dist}`,
+  (lat, lon, dist) => `https://opendata.adsb.fi/api/v2/lat/${lat}/lon/${lon}/dist/${dist}`,
+];
 
 function buildUrl() {
-  // Always fetch the full 400 NM radius regardless of zoom level.
-  // Zoom only controls what gets rendered on screen — no re-fetch needed.
-  return `${WORKER_URL}?lat=${centerLat.toFixed(4)}&lon=${centerLon.toFixed(4)}&dist=${FETCH_RANGE_NM}`;
+  // Caller iterates SOURCES directly; this just returns the current source index
+  return null; // not used — see fetchFlights()
 }
 
 let fetchInProgress = false;
 let fetchCount = 0;
 
 async function fetchFlights() {
-  // Hard guard: never allow two fetches at the same time
   if (fetchInProgress) return;
   fetchInProgress = true;
   clearTimeout(fetchTimer);
@@ -713,44 +716,49 @@ async function fetchFlights() {
   fetchCount++;
   const fetchEl = document.getElementById('hdr-fetch');
   if (fetchEl) fetchEl.textContent = `FETCH #${fetchCount}`;
-  try {
-    showToast('POLLING DATA SOURCE…', false);
-    const url        = buildUrl();
-    const controller = new AbortController();
-    const timeoutId  = setTimeout(() => controller.abort(), 9000);
-    let res;
+
+  let succeeded = false;
+  for (const source of SOURCES) {
+    const url = source(centerLat.toFixed(4), centerLon.toFixed(4), FETCH_RANGE_NM);
     try {
-      res = await fetch(url, { signal: controller.signal });
-    } finally {
-      clearTimeout(timeoutId);
+      showToast('POLLING DATA SOURCE…', false);
+      const controller = new AbortController();
+      const timeoutId  = setTimeout(() => controller.abort(), 9000);
+      let res;
+      try {
+        res = await fetch(url, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeoutId);
+      }
+      if (!res.ok) { console.warn(`Source ${url} returned ${res.status}`); continue; }
+      const json = await res.json();
+      if (!json.ac) { console.warn(`Source ${url} returned no ac array`); continue; }
+
+      aircraft = json.ac.map(ac => ({
+        icao24:      ac.hex  || '',
+        callsign:    (ac.flight || ac.r || '').trim(),
+        origin:      ac.ownOp || ac.r || '',
+        longitude:   ac.lon,
+        latitude:    ac.lat,
+        baro_alt_ft: typeof ac.alt_baro === 'number' ? ac.alt_baro : null,
+        on_ground:   ac.alt_baro === 'ground',
+        velocity_kt: typeof ac.gs === 'number' ? ac.gs : null,
+        true_track:  ac.track,
+      })).filter(a => !a.on_ground && a.latitude != null);
+
+      document.getElementById('hdr-contacts').textContent = 'CONTACTS: ' + aircraft.length;
+      updateContactsList();
+      if (selectedId) updateDetailPanel(aircraft.find(a => a.icao24 === selectedId));
+      showToast(`${aircraft.length} CONTACTS ACQUIRED`, true);
+      succeeded = true;
+      break;
+    } catch (e) {
+      console.warn(`Source ${url} error:`, e.message);
     }
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const json = await res.json();
-
-    // airplanes.live / ADSBExchange v2 format: { ac: [...] }
-    aircraft = (json.ac || []).map(ac => ({
-      icao24:      ac.hex  || '',
-      callsign:    (ac.flight || ac.r || '').trim(),
-      origin:      ac.ownOp || ac.r || '',
-      longitude:   ac.lon,
-      latitude:    ac.lat,
-      baro_alt_ft: typeof ac.alt_baro === 'number' ? ac.alt_baro : null,
-      on_ground:   ac.alt_baro === 'ground',
-      velocity_kt: typeof ac.gs === 'number' ? ac.gs : null,
-      true_track:  ac.track,
-    })).filter(a => !a.on_ground && a.latitude != null);
-
-    document.getElementById('hdr-contacts').textContent = 'CONTACTS: ' + aircraft.length;
-    updateContactsList();
-    if (selectedId) updateDetailPanel(aircraft.find(a => a.icao24 === selectedId));
-    showToast(`${aircraft.length} CONTACTS ACQUIRED`, true);
-  } catch (e) {
-    console.warn('OpenSky fetch error:', e.message);
-    showToast('SIGNAL LOST — RETRYING…', false);
   }
 
+  if (!succeeded) showToast('SIGNAL LOST — RETRYING…', false);
   fetchInProgress = false;
-  // Schedule exactly one next fetch, always 12 s from now
   fetchTimer = setTimeout(fetchFlights, REFRESH_MS);
 }
 
